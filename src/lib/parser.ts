@@ -55,6 +55,8 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
     const links = extractWikiLinks(content);
     const paragraphs = content.split(/\n\n+/);
 
+    const bodyTargets = new Set<string>();
+
     for (const link of links) {
       const targetId = resolveLink(link.raw, stemLookup, allPathsSet);
       const resolvedTarget = targetId ?? `_stub/${link.raw}.md`;
@@ -67,15 +69,54 @@ export async function parseVault(vaultPath: string): Promise<ParseResult> {
         ?? paragraphs.find(p => p.includes(link.display ?? link.raw))
         ?? '';
 
+      bodyTargets.add(resolvedTarget);
+
       edges.push({
         sourceId: relPath,
         targetId: resolvedTarget,
         context: context.trim(),
       });
     }
+
+    // Wikilinks declared as frontmatter fields, e.g. `up: "[[Parent]]"` or
+    // `cites: ["[[Source A]]", "[[Source B]]"]`. gray-matter has already split these
+    // out into `fm`, and extractWikiLinks above only ever sees the body, so without
+    // this pass frontmatter relationships never become edges at all. The field name
+    // is recorded in the edge context, since ParsedEdge has nowhere else to put it.
+    const fmTargets = new Set<string>();
+
+    for (const [field, value] of Object.entries(fm)) {
+      for (const link of extractWikiLinks(collectStrings(value).join('\n'))) {
+        const targetId = resolveLink(link.raw, stemLookup, allPathsSet);
+        const resolvedTarget = targetId ?? `_stub/${link.raw}.md`;
+
+        if (!targetId) {
+          stubIds.add(resolvedTarget);
+        }
+
+        // Don't duplicate an edge the body already produced, and don't emit the same
+        // target twice when several frontmatter fields point at it.
+        if (bodyTargets.has(resolvedTarget) || fmTargets.has(resolvedTarget)) continue;
+        fmTargets.add(resolvedTarget);
+
+        edges.push({
+          sourceId: relPath,
+          targetId: resolvedTarget,
+          context: `frontmatter: ${field}`,
+        });
+      }
+    }
   }
 
   return { nodes, edges, stubIds };
+}
+
+/** Flatten a frontmatter value to the strings inside it, so nested lists and maps are searched too. */
+function collectStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(collectStrings);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(collectStrings);
+  return [];
 }
 
 function extractInlineTags(content: string): string[] {
